@@ -7,6 +7,126 @@ from sklearn.decomposition import PCA
 
 
 """
+Function to remove all the land in a dataset
+Input arguments :
+    - u : Eastward component, shape:(time,lat,lon)
+    - v : Northward component, shape:(time,lat,lon)
+    - var_u : Eastward component variance, shape:(time,lat,lon)
+    - var_v : Northward component variance,shape:(time,lat,lon)
+    - mask : dataset which contain index where we have land or not, shape(size(late)*size(lon))  
+    - LAT : dataset of latitude (with a meshgrid), shape(lat,lon)
+    - LONG : dataset of longitude (with a meshgrid), shape(lat,lon)
+Output arguments :
+    - ny : y without land
+    - var_ny : variance of ny
+    - nLAT : latitude without land
+    - nLONG :  longitude without land
+    - nr : new shape of the state vector
+    - indland - list of all the remove index
+"""
+def remland(u,v,var_u,var_v,mask,LAT,LONG):
+    #Shape
+    T=u.shape[0]
+    la=u.shape[1]
+    lo=u.shape[2]
+    r=la*lo
+
+    uc=np.zeros((T,r))
+    vc=np.zeros((T,r))
+    var_uc=np.zeros((T,r))
+    var_vc=np.zeros((T,r))
+
+    for t in range(T):
+        uc[t,:]=u[t,:,:].flatten()
+        vc[t,:]=v[t,:,:].flatten()
+        var_uc[t,:]=var_u[t,:,:].flatten()
+        var_vc[t,:]=var_v[t,:,:].flatten()
+
+    
+    indland=[]
+    for k in range(len(mask)):
+        if np.isnan(mask[k])==True:
+            indland.append(k)
+
+    LaLoc=r-len(indland)  # Shape of uc and vc after remove all the index of indland
+    nr=2*LaLoc # size of the state vector without land
+
+    nu=np.zeros((T,LaLoc))  # u without land 
+    nv=np.zeros((T,LaLoc)) # v without land
+    nvar_u=np.zeros((T,LaLoc)) # var_u without land
+    nvar_v=np.zeros((T,LaLoc)) # var_v without land
+
+
+    for t in range(T):
+        nu[t,:]=np.delete(uc[t,:],indland)
+        nv[t,:]=np.delete(vc[t,:],indland)
+        nvar_u[t,:]=np.delete(var_uc[t,:],indland)
+        nvar_v[t,:]=np.delete(var_vc[t,:],indland)
+
+    # Delete all index in the mask of the LONG and LAT variable
+    nLAT=np.delete(LAT.flatten(),indland)
+    nLONG=np.delete(LONG.flatten(),indland)
+
+    # Creation of y and var_y vector without land
+
+    ny=np.zeros((T,nr))
+    var_ny=np.zeros((T,nr))
+
+    for t in range(T):
+        ny[t,:]=np.concatenate((nu[t,:],nv[t,:]))
+        var_ny[t,:]=np.concatenate((nvar_u[t,:],nvar_v[t,:]))
+    
+    return ny,var_ny,nLAT,nLONG,nr,indland
+
+
+"""
+Function which insert all index with land in result 
+Input arguments :
+    - xs : reconstructed curent without land
+    - Ps : variance matrix of xs 
+    - indland : list which contain all the index of land in the area 
+Output arguments :
+    - xs : reconstruted current in the whole area 
+    - Ps : variance matrix of xs
+    - us : Eastward component of xs
+    - vs : Northward component of xs 
+"""
+
+def reiland(xs,Ps,indland):
+
+    #Shape
+    T=xs.shape[0]
+    mid=int(len(xs[0,:])/2)
+    
+    us=np.zeros((T,mid))
+    vs=np.zeros((T,mid))
+
+    for t in range(T):
+        us[t,:]=xs[t,0:mid]
+        vs[t,:]=xs[t,mid:]
+
+    for k in range(len(indland)):
+        us=np.insert(us,indland[k],np.nan,1)
+        vs=np.insert(vs,indland[k],np.nan,1)
+
+    # Add all indland+La*Lo
+    r=us.shape[1]
+    for j in range(len(indland)):
+        indland.append(indland[j]+r)
+    
+    for k in range(len(indland)):
+        Ps=np.insert(Ps,indland[k],np.nan,1)
+        Ps=np.insert(Ps,indland[k],np.nan,2)
+    
+    xs=np.zeros((T,2*r))
+    for t in range(T):
+        xs[t,:]=np.concatenate((us[t,:],vs[t,:]))
+
+    return xs,Ps,us,vs
+
+
+
+"""
 Function returning the list of indices without observations
 Input arguments :
     - y : vector of observations
@@ -82,6 +202,16 @@ def matREM(y,xs,Ps,p,H):
         R=R+Rt
 
     CO+=(T-1)
+    
+    # Modification à vérifier pas sûr si les résultats sont cohérents
+    """
+    if(np.min(CO))==0:
+        for i in range(p):
+            for j in range(p):
+                if CO[i,j]==0:
+                    CO[i,j]=1
+                    print(R[i,j],'pour i=',i,'et j=',j)
+    """
     R=R/CO
     return R
 
@@ -331,7 +461,7 @@ Output arguments
     - xs : smooth state vector
     - Ps : covariance matrix of xs 
 """
-def Kalman_EM(y,var_y,x0,P0,M,Q,R,H,N):
+def Kalman_EM(y,var_y,x0,P0,M,Q,R,H,N,opt):
     #shapes
     r=len(x0)
     p=y.shape[1]
@@ -356,8 +486,15 @@ def Kalman_EM(y,var_y,x0,P0,M,Q,R,H,N):
             C+=Ps[t+1,:,:]+np.transpose(np.array([xs[t+1,:]]))@np.array([xs[t+1,:]])
         
         M=B@inv(A)
+        if opt!=0:
+            M=np.diag(M)*np.eye(r) # 
         Q=(C-M@np.transpose(B))/(T-1)
+        if opt!=0:
+            Q=np.diag(Q)*np.eye(r) #
         R[0,:,:]=matREM(y,xs,Ps,p,H)
+        if opt!=0:
+            R[0,:,:]=np.diag(R[0,:,:])*np.eye(p) # 
         R[:,:,:]=R[0,:,:]
+        
     
     return slk,M,Q,R,xs,Ps
